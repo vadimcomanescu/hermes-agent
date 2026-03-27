@@ -402,7 +402,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
-        return web.json_response({"status": "ok", "platform": "hermes-agent"})
+        return web.json_response({"status": "ok", "platform": "teseo-agent"})
 
     async def _handle_models(self, request: "web.Request") -> "web.Response":
         """GET /v1/models — return hermes-agent as an available model."""
@@ -414,12 +414,12 @@ class APIServerAdapter(BasePlatformAdapter):
             "object": "list",
             "data": [
                 {
-                    "id": "hermes-agent",
+                    "id": "teseo-agent",
                     "object": "model",
                     "created": int(time.time()),
-                    "owned_by": "hermes",
+                    "owned_by": "teseo",
                     "permission": [],
-                    "root": "hermes-agent",
+                    "root": "teseo-agent",
                     "parent": None,
                 }
             ],
@@ -477,7 +477,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
         session_id = str(uuid.uuid4())
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
-        model_name = body.get("model", "hermes-agent")
+        model_name = body.get("model", "teseo-agent")
         created = int(time.time())
 
         if stream:
@@ -816,7 +816,7 @@ class APIServerAdapter(BasePlatformAdapter):
             "object": "response",
             "status": "completed",
             "created_at": created_at,
-            "model": body.get("model", "hermes-agent"),
+            "model": body.get("model", "teseo-agent"),
             "output": output_items,
             "usage": {
                 "input_tokens": usage.get("input_tokens", 0),
