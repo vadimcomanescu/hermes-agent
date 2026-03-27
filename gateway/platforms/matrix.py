@@ -180,7 +180,7 @@ class MatrixAdapter(BasePlatformAdapter):
         elif self._password and self._user_id:
             resp = await client.login(
                 self._password,
-                device_name="Hermes Agent",
+                device_name="Teseo Agent",
             )
             if isinstance(resp, nio.LoginResponse):
                 logger.info("Matrix: logged in as %s", self._user_id)
