@@ -5179,32 +5179,12 @@ class HermesCLI:
             _cprint(f"    {line}")
 
     # ------------------------------------------------------------------
-    # /live — Gemini Live real-time voice conversation
+    # /voice live — Gemini Live real-time voice conversation
     # ------------------------------------------------------------------
-
-    def _handle_live_command(self, command: str):
-        """Handle /live [stop] — start or stop a real-time voice session."""
-        parts = command.strip().split(maxsplit=1)
-        subcommand = parts[1].lower().strip() if len(parts) > 1 else ""
-
-        if subcommand == "stop":
-            self._stop_live_session()
-            return
-
-        if self._live_session and self._live_session.active:
-            _cprint(f"{_DIM}Live session already active. Use /live stop to end it.{_RST}")
-            return
-
-        self._start_live_session()
 
     def _start_live_session(self):
         """Start a Gemini Live real-time voice session."""
-        # Resolve Gemini API key
-        try:
-            from agent.google_oauth import resolve_gemini_token
-        except ImportError:
-            _cprint(f"\n{_BOLD}\033[31mMissing dependency: agent.google_oauth{_RST}")
-            return
+        from agent.google_oauth import resolve_gemini_token
 
         api_key = resolve_gemini_token()
         if not api_key:
@@ -5213,41 +5193,34 @@ class HermesCLI:
             _cprint(f"  Get a key at: https://aistudio.google.com/apikey")
             return
 
-        # Check audio dependencies
         try:
             import sounddevice as sd
             import numpy as np
         except ImportError:
             _cprint(f"\n{_GOLD}Audio packages required for live voice.{_RST}")
             _cprint(f"  Install: {_BOLD}pip install sounddevice numpy{_RST}")
-            _cprint(f"  Or: pip install hermes-agent[voice]")
             return
 
         try:
-            from agent.gemini_live import (
-                GeminiLiveVoiceSession,
-                OUTPUT_SAMPLE_RATE,
-                INPUT_SAMPLE_RATE,
-            )
+            from agent.gemini_live import GeminiLiveVoiceSession, OUTPUT_SAMPLE_RATE, INPUT_SAMPLE_RATE
         except ImportError as e:
-            _cprint(f"\n{_GOLD}Missing dependency for Gemini Live: {e}{_RST}")
+            _cprint(f"\n{_GOLD}Missing dependency: {e}{_RST}")
             _cprint(f"  Install: {_BOLD}pip install websockets{_RST}")
             return
 
-        _cprint(f"\n{_BOLD}\033[38;2;66;133;244m● Gemini Live{_RST} — real-time voice conversation")
-        _cprint(f"  {_DIM}Model: gemini-3.1-flash-live-preview{_RST}")
-        _cprint(f"  {_DIM}Speak naturally — the model hears you in real time.{_RST}")
-        _cprint(f"  {_DIM}Type /live stop or press Ctrl+C to end.{_RST}\n")
+        if self._live_session and self._live_session.active:
+            _cprint(f"{_DIM}Live session already active. Use /live stop to end it.{_RST}")
+            return
 
-        # Audio output stream (24 kHz) — plays model responses in real time
+        _cprint(f"\n{_BOLD}\033[38;2;66;133;244m● Gemini Live{_RST} — real-time voice")
+        _cprint(f"  {_DIM}Speak naturally. Type /live stop to end.{_RST}\n")
+
+        # Shared output buffer for audio playback
         output_buffer = bytearray()
         output_lock = threading.Lock()
-        playback_active = threading.Event()
-        playback_active.set()
 
         def _output_callback(outdata, frames, time_info, status):
-            """sounddevice output callback — feed PCM from the live session."""
-            needed = frames * 2  # 16-bit mono = 2 bytes per sample
+            needed = frames * 2  # 16-bit mono
             with output_lock:
                 if len(output_buffer) >= needed:
                     chunk = bytes(output_buffer[:needed])
@@ -5257,8 +5230,7 @@ class HermesCLI:
                     output_buffer.clear()
             outdata[:] = np.frombuffer(chunk, dtype=np.int16).reshape(-1, 1)
 
-        def _on_output_audio(pcm_data: bytes):
-            """Receive audio from Gemini and buffer for playback."""
+        def _on_audio(pcm_data: bytes):
             with output_lock:
                 output_buffer.extend(pcm_data)
 
@@ -5270,60 +5242,39 @@ class HermesCLI:
             if text.strip():
                 _cprint(f"  \033[38;2;66;133;244mGemini: {text.strip()}{_RST}")
 
-        def _on_turn_complete():
-            pass  # Audio playback continues from buffer
-
         def _on_interrupted():
-            """Barge-in: clear output buffer so stale audio doesn't play."""
             with output_lock:
                 output_buffer.clear()
 
         def _on_error(error: str):
             _cprint(f"\n  {_BOLD}\033[31mLive error: {error}{_RST}")
 
-        # Create session
         session = GeminiLiveVoiceSession(
             api_key=api_key,
-            model="gemini-3.1-flash-live-preview",
-            system_instruction=(
-                "You are a helpful voice assistant in a real-time conversation. "
-                "Keep responses concise and conversational. "
-                "The user is speaking to you through their microphone."
-            ),
-            on_output_audio=_on_output_audio,
+            system_instruction="You are a helpful voice assistant. Keep responses concise.",
+            on_audio=_on_audio,
             on_input_transcript=_on_input_transcript,
             on_output_transcript=_on_output_transcript,
-            on_turn_complete=_on_turn_complete,
             on_interrupted=_on_interrupted,
             on_error=_on_error,
         )
+        session.start()
 
-        # Start the WebSocket session
-        try:
-            session.start()
-        except Exception as exc:
-            _cprint(f"\n  {_BOLD}\033[31mFailed to start live session: {exc}{_RST}")
-            return
-
-        # Wait briefly for connection
+        # Wait for connection
         import time as _time
         deadline = _time.monotonic() + 10
         while not session.active and _time.monotonic() < deadline:
             _time.sleep(0.1)
-
         if not session.active:
-            _cprint(f"\n  {_BOLD}\033[31mLive session failed to connect.{_RST}")
+            _cprint(f"\n  {_BOLD}\033[31mFailed to connect.{_RST}")
             session.stop()
             return
 
-        # Start audio output stream (24 kHz playback)
+        # Start audio I/O
         try:
             self._live_audio_stream = sd.OutputStream(
-                samplerate=OUTPUT_SAMPLE_RATE,
-                channels=1,
-                dtype="int16",
-                callback=_output_callback,
-                blocksize=OUTPUT_SAMPLE_RATE // 20,  # 50ms blocks
+                samplerate=OUTPUT_SAMPLE_RATE, channels=1, dtype="int16",
+                callback=_output_callback, blocksize=OUTPUT_SAMPLE_RATE // 20,
             )
             self._live_audio_stream.start()
         except Exception as exc:
@@ -5331,21 +5282,11 @@ class HermesCLI:
             session.stop()
             return
 
-        # Start audio input stream (16 kHz capture → feed to session)
-        def _input_callback(indata, frames, time_info, status):
-            """sounddevice input callback — send mic audio to Gemini."""
-            if status:
-                logger.debug("Live mic status: %s", status)
-            pcm_bytes = indata.tobytes()
-            session.feed_audio(pcm_bytes)
-
         try:
             self._live_mic_stream = sd.InputStream(
-                samplerate=INPUT_SAMPLE_RATE,
-                channels=1,
-                dtype="int16",
-                callback=_input_callback,
-                blocksize=INPUT_SAMPLE_RATE // 10,  # 100ms blocks
+                samplerate=INPUT_SAMPLE_RATE, channels=1, dtype="int16",
+                callback=lambda indata, *_: session.feed_audio(indata.tobytes()),
+                blocksize=INPUT_SAMPLE_RATE // 10,
             )
             self._live_mic_stream.start()
         except Exception as exc:
@@ -5359,36 +5300,23 @@ class HermesCLI:
         _cprint(f"  {_BOLD}\033[32m🎙 Live — listening...{_RST}\n")
 
     def _stop_live_session(self):
-        """Stop the active Gemini Live session and clean up audio streams."""
+        """Stop the active Gemini Live session."""
         if not self._live_session:
             _cprint(f"{_DIM}No active live session.{_RST}")
             return
 
-        _cprint(f"\n  {_DIM}Ending live session...{_RST}")
+        for stream in (self._live_mic_stream, self._live_audio_stream):
+            if stream:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
+        self._live_mic_stream = None
+        self._live_audio_stream = None
 
-        # Stop mic input
-        if self._live_mic_stream:
-            try:
-                self._live_mic_stream.stop()
-                self._live_mic_stream.close()
-            except Exception:
-                pass
-            self._live_mic_stream = None
-
-        # Stop audio output
-        if self._live_audio_stream:
-            try:
-                self._live_audio_stream.stop()
-                self._live_audio_stream.close()
-            except Exception:
-                pass
-            self._live_audio_stream = None
-
-        # Stop WebSocket session
-        if self._live_session:
-            self._live_session.stop()
-            self._live_session = None
-
+        self._live_session.stop()
+        self._live_session = None
         _cprint(f"  {_BOLD}Live session ended.{_RST}\n")
 
     def _clarify_callback(self, question, choices):

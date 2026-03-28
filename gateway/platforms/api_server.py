@@ -406,27 +406,13 @@ class APIServerAdapter(BasePlatformAdapter):
         return web.json_response({"status": "ok", "platform": "hermes-agent"})
 
     async def _handle_realtime_ws(self, request: "web.Request") -> "web.WebSocketResponse":
-        """WS /v1/realtime — Gemini Live real-time voice proxy.
+        """WS /v1/realtime — proxy WebSocket clients to Gemini Live API.
 
-        Accepts WebSocket connections from web/mobile clients and bridges them
-        to the Gemini Live API.  Clients send base64-encoded 16kHz PCM audio
-        and receive base64-encoded 24kHz PCM audio responses.
-
-        Client → Server messages:
-          {"type": "audio", "data": "<base64 PCM 16kHz>"}
-          {"type": "text",  "text": "hello"}
-          {"type": "config", "model": "gemini-3.1-flash-live-preview", "system_instruction": "..."}
-
-        Server → Client messages:
-          {"type": "audio", "data": "<base64 PCM 24kHz>"}
-          {"type": "transcript.input", "text": "what user said"}
-          {"type": "transcript.output", "text": "what model said"}
-          {"type": "turn.complete"}
-          {"type": "interrupted"}
-          {"type": "error", "message": "..."}
-          {"type": "connected"}
+        Client sends: {"type":"audio","data":"<b64 PCM 16kHz>"} or {"type":"text","text":"..."}
+        Server sends: {"type":"audio","data":"<b64 PCM 24kHz>"}, transcripts, errors.
         """
-        # Auth check via query param or header
+        import base64 as b64
+
         if self._api_key:
             key = request.query.get("key") or request.headers.get("Authorization", "").replace("Bearer ", "")
             if key != self._api_key:
@@ -435,124 +421,53 @@ class APIServerAdapter(BasePlatformAdapter):
         ws = web.WebSocketResponse()
         await ws.prepare(request)
 
-        try:
-            from agent.google_oauth import resolve_gemini_token
-            from agent.gemini_live import GeminiLiveSession
-        except ImportError as exc:
-            await ws.send_json({"type": "error", "message": f"Missing dependency: {exc}"})
-            await ws.close()
-            return ws
+        from agent.google_oauth import resolve_gemini_token
+        from agent.gemini_live import GeminiLiveSession
 
         api_key = resolve_gemini_token()
         if not api_key:
-            await ws.send_json({
-                "type": "error",
-                "message": "No Gemini API key configured. Set GEMINI_API_KEY.",
-            })
+            await ws.send_json({"type": "error", "message": "No Gemini API key. Set GEMINI_API_KEY."})
             await ws.close()
             return ws
 
-        model = "gemini-3.1-flash-live-preview"
-        system_instruction = ""
-
-        # Wait for optional config message (first message within 5s)
-        try:
-            first_msg = await asyncio.wait_for(ws.receive_json(), timeout=5.0)
-            if first_msg.get("type") == "config":
-                model = first_msg.get("model", model)
-                system_instruction = first_msg.get("system_instruction", "")
-            else:
-                # Not a config message — process it after connecting
-                pass
-        except (asyncio.TimeoutError, TypeError):
-            first_msg = None
-
-        # Callbacks that forward to the client WebSocket
-        async def _send_safe(data: dict):
-            if not ws.closed:
-                try:
-                    await ws.send_json(data)
-                except Exception:
-                    pass
-
         loop = asyncio.get_event_loop()
 
-        def on_audio(pcm_data: bytes):
-            import base64
-            asyncio.run_coroutine_threadsafe(
-                _send_safe({"type": "audio", "data": base64.b64encode(pcm_data).decode()}),
-                loop,
-            )
-
-        def on_input_transcript(text: str):
-            asyncio.run_coroutine_threadsafe(
-                _send_safe({"type": "transcript.input", "text": text}), loop)
-
-        def on_output_transcript(text: str):
-            asyncio.run_coroutine_threadsafe(
-                _send_safe({"type": "transcript.output", "text": text}), loop)
-
-        def on_turn_complete():
-            asyncio.run_coroutine_threadsafe(
-                _send_safe({"type": "turn.complete"}), loop)
-
-        def on_interrupted():
-            asyncio.run_coroutine_threadsafe(
-                _send_safe({"type": "interrupted"}), loop)
-
-        def on_error(msg: str):
-            asyncio.run_coroutine_threadsafe(
-                _send_safe({"type": "error", "message": msg}), loop)
+        def _fwd(data: dict):
+            if not ws.closed:
+                asyncio.run_coroutine_threadsafe(ws.send_json(data), loop)
 
         session = GeminiLiveSession(
             api_key=api_key,
-            model=model,
-            system_instruction=system_instruction or (
-                "You are a helpful voice assistant. Keep responses concise and natural."
-            ),
-            on_audio=on_audio,
-            on_input_transcript=on_input_transcript,
-            on_output_transcript=on_output_transcript,
-            on_turn_complete=on_turn_complete,
-            on_interrupted=on_interrupted,
-            on_error=on_error,
+            system_instruction="You are a helpful voice assistant. Keep responses concise.",
+            on_audio=lambda d: _fwd({"type": "audio", "data": b64.b64encode(d).decode()}),
+            on_input_transcript=lambda t: _fwd({"type": "transcript.input", "text": t}),
+            on_output_transcript=lambda t: _fwd({"type": "transcript.output", "text": t}),
+            on_turn_complete=lambda: _fwd({"type": "turn.complete"}),
+            on_interrupted=lambda: _fwd({"type": "interrupted"}),
+            on_error=lambda m: _fwd({"type": "error", "message": m}),
         )
 
         try:
             await session.connect()
-            await _send_safe({"type": "connected", "model": model})
+            await ws.send_json({"type": "connected"})
         except Exception as exc:
             await ws.send_json({"type": "error", "message": str(exc)})
             await ws.close()
             return ws
 
-        # Process the first message if it wasn't a config
-        if first_msg and first_msg.get("type") != "config":
-            import base64 as _b64
-            if first_msg.get("type") == "audio":
-                await session.send_audio(_b64.b64decode(first_msg["data"]))
-            elif first_msg.get("type") == "text":
-                await session.send_text(first_msg.get("text", ""))
-
-        # Main message loop
         try:
-            import base64 as _b64
             async for msg in ws:
-                if msg.type in (web.WSMsgType.TEXT,):
+                if msg.type == web.WSMsgType.TEXT:
                     try:
                         data = json.loads(msg.data)
                     except json.JSONDecodeError:
                         continue
-                    msg_type = data.get("type", "")
-                    if msg_type == "audio":
-                        raw = _b64.b64decode(data.get("data", ""))
-                        await session.send_audio(raw)
-                    elif msg_type == "text":
+                    if data.get("type") == "audio":
+                        await session.send_audio(b64.b64decode(data.get("data", "")))
+                    elif data.get("type") == "text":
                         await session.send_text(data.get("text", ""))
                 elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
                     break
-        except Exception as exc:
-            logger.debug("Realtime WS error: %s", exc)
         finally:
             await session.disconnect()
 
