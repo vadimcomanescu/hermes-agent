@@ -389,6 +389,30 @@ def resolve_runtime_provider(
             "requested_provider": requested_provider,
         }
 
+    # Gemini (Google AI — API key or OAuth)
+    if provider == "gemini":
+        from agent.google_oauth import resolve_gemini_token, GEMINI_BASE_URL
+        token = resolve_gemini_token()
+        if not token:
+            raise AuthError(
+                "No Gemini credentials found. Set GEMINI_API_KEY or GOOGLE_API_KEY, "
+                "or run 'hermes setup' to authenticate with Google OAuth."
+            )
+        model_cfg = _get_model_config()
+        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+        cfg_base_url = ""
+        if cfg_provider == "gemini":
+            cfg_base_url = (model_cfg.get("base_url") or "").strip().rstrip("/")
+        base_url = cfg_base_url or GEMINI_BASE_URL.rstrip("/")
+        return {
+            "provider": "gemini",
+            "api_mode": "chat_completions",
+            "base_url": base_url,
+            "api_key": token,
+            "source": "env",
+            "requested_provider": requested_provider,
+        }
+
     # API-key providers (z.ai/GLM, Kimi, MiniMax, MiniMax-CN)
     pconfig = PROVIDER_REGISTRY.get(provider)
     if pconfig and pconfig.auth_type == "api_key":
