@@ -8,6 +8,7 @@ Exposes an HTTP server with endpoints:
 - DELETE /v1/responses/{response_id} — Delete a stored response
 - GET  /v1/models                  — lists hermes-agent as an available model
 - GET  /health                     — health check
+- WS   /v1/realtime               — Gemini Live real-time voice WebSocket
 
 Any OpenAI-compatible frontend (Open WebUI, LobeChat, LibreChat,
 AnythingLLM, NextChat, ChatBox, etc.) can connect to hermes-agent
@@ -403,6 +404,74 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
         return web.json_response({"status": "ok", "platform": "hermes-agent"})
+
+    async def _handle_realtime_ws(self, request: "web.Request") -> "web.WebSocketResponse":
+        """WS /v1/realtime — proxy WebSocket clients to Gemini Live API.
+
+        Client sends: {"type":"audio","data":"<b64 PCM 16kHz>"} or {"type":"text","text":"..."}
+        Server sends: {"type":"audio","data":"<b64 PCM 24kHz>"}, transcripts, errors.
+        """
+        import base64 as b64
+
+        if self._api_key:
+            key = request.query.get("key") or request.headers.get("Authorization", "").replace("Bearer ", "")
+            if key != self._api_key:
+                return web.json_response({"error": "Unauthorized"}, status=401)
+
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+
+        from agent.google_oauth import resolve_gemini_token
+        from agent.gemini_live import GeminiLiveSession
+
+        api_key = resolve_gemini_token()
+        if not api_key:
+            await ws.send_json({"type": "error", "message": "No Gemini API key. Set GEMINI_API_KEY."})
+            await ws.close()
+            return ws
+
+        loop = asyncio.get_event_loop()
+
+        def _fwd(data: dict):
+            if not ws.closed:
+                asyncio.run_coroutine_threadsafe(ws.send_json(data), loop)
+
+        session = GeminiLiveSession(
+            api_key=api_key,
+            system_instruction="You are a helpful voice assistant. Keep responses concise.",
+            on_audio=lambda d: _fwd({"type": "audio", "data": b64.b64encode(d).decode()}),
+            on_input_transcript=lambda t: _fwd({"type": "transcript.input", "text": t}),
+            on_output_transcript=lambda t: _fwd({"type": "transcript.output", "text": t}),
+            on_turn_complete=lambda: _fwd({"type": "turn.complete"}),
+            on_interrupted=lambda: _fwd({"type": "interrupted"}),
+            on_error=lambda m: _fwd({"type": "error", "message": m}),
+        )
+
+        try:
+            await session.connect()
+            await ws.send_json({"type": "connected"})
+        except Exception as exc:
+            await ws.send_json({"type": "error", "message": str(exc)})
+            await ws.close()
+            return ws
+
+        try:
+            async for msg in ws:
+                if msg.type == web.WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                    except json.JSONDecodeError:
+                        continue
+                    if data.get("type") == "audio":
+                        await session.send_audio(b64.b64decode(data.get("data", "")))
+                    elif data.get("type") == "text":
+                        await session.send_text(data.get("text", ""))
+                elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
+                    break
+        finally:
+            await session.disconnect()
+
+        return ws
 
     async def _handle_models(self, request: "web.Request") -> "web.Response":
         """GET /v1/models — return hermes-agent as an available model."""
@@ -1236,6 +1305,8 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/api/jobs/{job_id}/pause", self._handle_pause_job)
             self._app.router.add_post("/api/jobs/{job_id}/resume", self._handle_resume_job)
             self._app.router.add_post("/api/jobs/{job_id}/run", self._handle_run_job)
+            # Gemini Live real-time voice WebSocket
+            self._app.router.add_get("/v1/realtime", self._handle_realtime_ws)
 
             self._runner = web.AppRunner(self._app)
             await self._runner.setup()

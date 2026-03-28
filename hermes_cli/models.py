@@ -33,6 +33,7 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("openai/gpt-5.4-mini",             ""),
     ("xiaomi/mimo-v2-pro",               ""),
     ("openai/gpt-5.3-codex",            ""),
+    ("google/gemini-3.1-flash-live",    "new — real-time audio/live"),
     ("google/gemini-3-pro-preview",     ""),
     ("google/gemini-3-flash-preview",   ""),
     ("qwen/qwen3.5-plus-02-15",         ""),
@@ -60,6 +61,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "openai/gpt-5.4-mini",
         "xiaomi/mimo-v2-pro",
         "openai/gpt-5.3-codex",
+        "google/gemini-3.1-flash-live",
         "google/gemini-3-pro-preview",
         "google/gemini-3-flash-preview",
         "qwen/qwen3.5-plus-02-15",
@@ -217,6 +219,15 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "qwen3.5-flash",
         "qwen-vl-max",
     ],
+    "gemini": [
+        "gemini-3.1-flash-live",
+        "gemini-3.1-pro",
+        "gemini-3-pro-preview",
+        "gemini-3-flash-preview",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+    ],
     # Curated HF model list — only agentic models that map to OpenRouter defaults.
     "huggingface": [
         "Qwen/Qwen3.5-397B-A17B",
@@ -248,6 +259,7 @@ _PROVIDER_LABELS = {
     "kilocode": "Kilo Code",
     "alibaba": "Alibaba Cloud (DashScope)",
     "huggingface": "Hugging Face",
+    "gemini": "Google Gemini",
     "custom": "Custom endpoint",
 }
 
@@ -286,6 +298,10 @@ _PROVIDER_ALIASES = {
     "hf": "huggingface",
     "hugging-face": "huggingface",
     "huggingface-hub": "huggingface",
+    "google": "gemini",
+    "google-ai": "gemini",
+    "google-gemini": "gemini",
+    "gemini-api": "gemini",
 }
 
 

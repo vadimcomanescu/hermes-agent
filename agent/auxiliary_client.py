@@ -59,6 +59,7 @@ _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
     "minimax": "MiniMax-M2.7-highspeed",
     "minimax-cn": "MiniMax-M2.7-highspeed",
     "anthropic": "claude-haiku-4-5-20251001",
+    "gemini": "gemini-3-flash-preview",
     "ai-gateway": "google/gemini-3-flash",
     "opencode-zen": "gemini-3-flash",
     "opencode-go": "glm-5",
