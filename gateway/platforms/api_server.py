@@ -8,6 +8,7 @@ Exposes an HTTP server with endpoints:
 - DELETE /v1/responses/{response_id} — Delete a stored response
 - GET  /v1/models                  — lists hermes-agent as an available model
 - GET  /health                     — health check
+- WS   /v1/realtime               — Gemini Live real-time voice WebSocket
 
 Any OpenAI-compatible frontend (Open WebUI, LobeChat, LibreChat,
 AnythingLLM, NextChat, ChatBox, etc.) can connect to hermes-agent
@@ -403,6 +404,159 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
         return web.json_response({"status": "ok", "platform": "hermes-agent"})
+
+    async def _handle_realtime_ws(self, request: "web.Request") -> "web.WebSocketResponse":
+        """WS /v1/realtime — Gemini Live real-time voice proxy.
+
+        Accepts WebSocket connections from web/mobile clients and bridges them
+        to the Gemini Live API.  Clients send base64-encoded 16kHz PCM audio
+        and receive base64-encoded 24kHz PCM audio responses.
+
+        Client → Server messages:
+          {"type": "audio", "data": "<base64 PCM 16kHz>"}
+          {"type": "text",  "text": "hello"}
+          {"type": "config", "model": "gemini-3.1-flash-live-preview", "system_instruction": "..."}
+
+        Server → Client messages:
+          {"type": "audio", "data": "<base64 PCM 24kHz>"}
+          {"type": "transcript.input", "text": "what user said"}
+          {"type": "transcript.output", "text": "what model said"}
+          {"type": "turn.complete"}
+          {"type": "interrupted"}
+          {"type": "error", "message": "..."}
+          {"type": "connected"}
+        """
+        # Auth check via query param or header
+        if self._api_key:
+            key = request.query.get("key") or request.headers.get("Authorization", "").replace("Bearer ", "")
+            if key != self._api_key:
+                return web.json_response({"error": "Unauthorized"}, status=401)
+
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+
+        try:
+            from agent.google_oauth import resolve_gemini_token
+            from agent.gemini_live import GeminiLiveSession
+        except ImportError as exc:
+            await ws.send_json({"type": "error", "message": f"Missing dependency: {exc}"})
+            await ws.close()
+            return ws
+
+        api_key = resolve_gemini_token()
+        if not api_key:
+            await ws.send_json({
+                "type": "error",
+                "message": "No Gemini API key configured. Set GEMINI_API_KEY.",
+            })
+            await ws.close()
+            return ws
+
+        model = "gemini-3.1-flash-live-preview"
+        system_instruction = ""
+
+        # Wait for optional config message (first message within 5s)
+        try:
+            first_msg = await asyncio.wait_for(ws.receive_json(), timeout=5.0)
+            if first_msg.get("type") == "config":
+                model = first_msg.get("model", model)
+                system_instruction = first_msg.get("system_instruction", "")
+            else:
+                # Not a config message — process it after connecting
+                pass
+        except (asyncio.TimeoutError, TypeError):
+            first_msg = None
+
+        # Callbacks that forward to the client WebSocket
+        async def _send_safe(data: dict):
+            if not ws.closed:
+                try:
+                    await ws.send_json(data)
+                except Exception:
+                    pass
+
+        loop = asyncio.get_event_loop()
+
+        def on_audio(pcm_data: bytes):
+            import base64
+            asyncio.run_coroutine_threadsafe(
+                _send_safe({"type": "audio", "data": base64.b64encode(pcm_data).decode()}),
+                loop,
+            )
+
+        def on_input_transcript(text: str):
+            asyncio.run_coroutine_threadsafe(
+                _send_safe({"type": "transcript.input", "text": text}), loop)
+
+        def on_output_transcript(text: str):
+            asyncio.run_coroutine_threadsafe(
+                _send_safe({"type": "transcript.output", "text": text}), loop)
+
+        def on_turn_complete():
+            asyncio.run_coroutine_threadsafe(
+                _send_safe({"type": "turn.complete"}), loop)
+
+        def on_interrupted():
+            asyncio.run_coroutine_threadsafe(
+                _send_safe({"type": "interrupted"}), loop)
+
+        def on_error(msg: str):
+            asyncio.run_coroutine_threadsafe(
+                _send_safe({"type": "error", "message": msg}), loop)
+
+        session = GeminiLiveSession(
+            api_key=api_key,
+            model=model,
+            system_instruction=system_instruction or (
+                "You are a helpful voice assistant. Keep responses concise and natural."
+            ),
+            on_audio=on_audio,
+            on_input_transcript=on_input_transcript,
+            on_output_transcript=on_output_transcript,
+            on_turn_complete=on_turn_complete,
+            on_interrupted=on_interrupted,
+            on_error=on_error,
+        )
+
+        try:
+            await session.connect()
+            await _send_safe({"type": "connected", "model": model})
+        except Exception as exc:
+            await ws.send_json({"type": "error", "message": str(exc)})
+            await ws.close()
+            return ws
+
+        # Process the first message if it wasn't a config
+        if first_msg and first_msg.get("type") != "config":
+            import base64 as _b64
+            if first_msg.get("type") == "audio":
+                await session.send_audio(_b64.b64decode(first_msg["data"]))
+            elif first_msg.get("type") == "text":
+                await session.send_text(first_msg.get("text", ""))
+
+        # Main message loop
+        try:
+            import base64 as _b64
+            async for msg in ws:
+                if msg.type in (web.WSMsgType.TEXT,):
+                    try:
+                        data = json.loads(msg.data)
+                    except json.JSONDecodeError:
+                        continue
+                    msg_type = data.get("type", "")
+                    if msg_type == "audio":
+                        raw = _b64.b64decode(data.get("data", ""))
+                        await session.send_audio(raw)
+                    elif msg_type == "text":
+                        await session.send_text(data.get("text", ""))
+                elif msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
+                    break
+        except Exception as exc:
+            logger.debug("Realtime WS error: %s", exc)
+        finally:
+            await session.disconnect()
+
+        return ws
 
     async def _handle_models(self, request: "web.Request") -> "web.Response":
         """GET /v1/models — return hermes-agent as an available model."""
@@ -1236,6 +1390,8 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/api/jobs/{job_id}/pause", self._handle_pause_job)
             self._app.router.add_post("/api/jobs/{job_id}/resume", self._handle_resume_job)
             self._app.router.add_post("/api/jobs/{job_id}/run", self._handle_run_job)
+            # Gemini Live real-time voice WebSocket
+            self._app.router.add_get("/v1/realtime", self._handle_realtime_ws)
 
             self._runner = web.AppRunner(self._app)
             await self._runner.setup()
