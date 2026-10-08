@@ -4,7 +4,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-$items = Get-Content -Raw -LiteralPath $Manifest | ConvertFrom-Json
+# payload-sign-cache.mjs writes the manifest as UTF-8 without a BOM, which
+# Windows PowerShell would otherwise read in the ANSI code page.
+$items = Get-Content -Raw -Encoding UTF8 -LiteralPath $Manifest | ConvertFrom-Json
 $results = @(
     foreach ($item in $items) {
         $signature = Get-AuthenticodeSignature -LiteralPath $item.path

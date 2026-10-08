@@ -71,6 +71,20 @@ test.runIf(process.platform === 'win32')('native verification binds cached bytes
   } finally { f.cleanup() }
 }, 30000)
 
+test.runIf(process.platform === 'win32')('a manifest outside ASCII reaches the native check intact', async () => {
+  const f = fixture()
+  try {
+    const publisher = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      '(Get-AuthenticodeSignature -LiteralPath $env:NATIVE_SIGN_TEST_INPUT).SignerCertificate.Subject'
+    ], { encoding: 'utf8', windowsHide: true, env: { ...process.env, NATIVE_SIGN_TEST_INPUT: process.execPath } }).trim()
+    // Paths and publishers share the manifest's encoding: a Windows-1252
+    // reading turns 'ș' and 'ü' into other characters and the file is missed.
+    const files = [path.join(f.root, 'Timișoara-Zürich.exe')]
+    fs.copyFileSync(process.execPath, files[0])
+    expect(await verifySignedPayloads(files, publisher)).toEqual(new Set(files))
+  } finally { f.cleanup() }
+}, 30000)
+
 test.runIf(process.platform === 'win32')('catalog trust cannot mask the embedded signature', async () => {
   const f = fixture()
   vi.stubEnv('ELECTRON_BUILDER_CACHE', path.join(f.root, 'sdk-cache'))
