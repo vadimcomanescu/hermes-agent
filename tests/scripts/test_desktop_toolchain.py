@@ -263,6 +263,25 @@ def test_native_cache_identity_tracks_compilers_sdk_and_openssl(tmp_path, monkey
     assert desktop_toolchain.native_cache_path(cache, env) != desktop_toolchain.native_cache_path(cache, env)
 
 
+@pytest.mark.platforms("linux", "macos", "windows")
+def test_native_cache_identity_reads_windows_environment_names_in_any_case(tmp_path, monkeypatch):
+    from scripts.bundles import desktop_toolchain
+
+    # os.environ on Windows presents every name in upper case; the inherited
+    # Visual Studio environment must still complete the identity.
+    monkeypatch.setattr("pm.store.current_target", lambda: "win32-x64")
+    desktop_toolchain.platform.platform()
+    monkeypatch.setattr(desktop_toolchain.subprocess, "run",
+                        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="identity", stderr=""))
+    names = {"WindowsSDKVersion": "10.0.26100.0\\", "VCToolsVersion": "14.50.35717", "INCLUDE": "C:\\VC\\include"}
+    upper = {name.upper(): value for name, value in names.items()}
+    cache = tmp_path / "cache"
+
+    key = desktop_toolchain.native_cache_path(cache, upper)
+
+    assert key == desktop_toolchain.native_cache_path(cache, upper) == desktop_toolchain.native_cache_path(cache, names)
+
+
 @pytest.mark.parametrize("complete", [False, True])
 def test_native_cache_leaves_room_for_sdist_compiler_outputs(tmp_path, monkeypatch, complete):
     from pathlib import PureWindowsPath

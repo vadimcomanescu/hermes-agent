@@ -134,6 +134,13 @@ def native_cache_path(cache: Path, env: Mapping[str, str]) -> Path:
             "SDKROOT", "MACOSX_DEPLOYMENT_TARGET", "WindowsSDKVersion", "VCToolsVersion",
             "WindowsSdkDir", "INCLUDE", "LIB", "LIBPATH", "OPENSSL_DIR", "OPENSSL_LIB_DIR",
             "OPENSSL_INCLUDE_DIR", "OPENSSL_STATIC"}
+    if target.startswith("win32"):
+        # Windows environment names are case-insensitive, and os.environ
+        # presents them in upper case, so an inherited Visual Studio
+        # environment arrives as WINDOWSSDKVERSION. Read the identity's names
+        # in any case, or the key is never complete and nothing is reused.
+        canonical = {key.upper(): key for key in keys}
+        env = {canonical.get(key.upper(), key): value for key, value in env.items()}
     selected = {key: value for key, value in env.items() if key in keys or key.startswith("CC_")}
     identity = {"recipe": 1, "target": target, "host": platform.platform(),
                 "libc": platform.libc_ver(), "inputs": selected, "probes": [], "openssl": {}}
