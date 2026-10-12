@@ -137,11 +137,14 @@ video, and documents to the agent. Hermes downloads attachments only after
 the message has passed self-echo, addressing, and sender authorization checks.
 Each file must use HTTPS and declare an exact byte size and SHA-256 digest;
 redirects, URL credentials, fragments, oversized payloads, and integrity
-mismatches are rejected.
+mismatches are rejected. The one exception to HTTPS is a relay that itself runs
+on plain HTTP, such as one on a private network with no certificate: its own
+files are accepted over plain HTTP, and nothing else is.
 
-The relay's own HTTPS origin is trusted automatically. If a community stores
-media on another public origin, add its exact `host` or `host:port` to
-`attachment_hosts` under `gateway.platforms.buzz.extra`. Non-default ports
+The relay's own origin is trusted automatically, over the scheme the relay is
+configured with. If a community stores media on another public origin, add its
+exact `host` or `host:port` to `attachment_hosts` under
+`gateway.platforms.buzz.extra`; those origins are HTTPS only. Non-default ports
 must be listed explicitly. Protected media that requires authenticated
 retrieval through the Buzz CLI is not handled by this native public-URL path.
 

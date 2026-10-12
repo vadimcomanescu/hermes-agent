@@ -125,18 +125,18 @@ def _safe_attachment_filename(value: str) -> str:
     return f"{safe_stem or 'attachment'}{suffix}"
 
 
-def _attachment_origin(value: str) -> Optional[tuple[str, int]]:
-    """Normalize a configured host/URL to an exact HTTPS-equivalent origin."""
+def _attachment_origin(value: str, schemes: tuple[str, ...] = ("https", "wss")) -> Optional[tuple[str, int]]:
+    """Normalize a configured host/URL to an exact origin on one of *schemes* (HTTPS-equivalent by default)."""
     raw = str(value or "").strip()
     if not raw:
         return None
     try:
         parsed = urlsplit(raw if "://" in raw else f"//{raw}")
         host = (parsed.hostname or "").lower().rstrip(".")
-        port = parsed.port or 443
+        port = parsed.port or (80 if parsed.scheme == "http" else 443)
     except ValueError:
         return None
-    if (parsed.scheme and parsed.scheme not in {"https", "wss"}) or not host:
+    if (parsed.scheme and parsed.scheme not in schemes) or not host:
         return None
     return host, port
 
@@ -515,11 +515,10 @@ class BuzzAdapter(BasePlatformAdapter):
         # Env overrides config.yaml, except under a secondary profile scope where extra wins (_scoped_platform_setting).
         self.relay_url = _configured_relay(extra)
         hosts = _split_csv(extra.get("attachment_hosts", []))
-        origins = (_attachment_origin(h) for h in hosts if isinstance(h, str))
+        origins = (_attachment_origin(h) for h in (*hosts, self.relay_url) if isinstance(h, str))
         self._attachment_origins = {o for o in origins if o is not None}
-        relay_origin = _attachment_origin(self.relay_url)
-        if relay_origin is not None:
-            self._attachment_origins.add(relay_origin)
+        # A relay on plain http (a private network, no certificate) is trusted for its own files over http only.
+        self._plain_http_origin = _attachment_origin(self.relay_url, ("http",)) if self.relay_url.lower().startswith("http://") else None
         self.cli_path = _configured_cli_path(extra)
         # Channels to watch: env csv > extra list/csv; empty = all joined channels
         raw_channels = _split_csv(_setting_or("BUZZ_CHANNELS", extra, "channels", []))
@@ -1398,7 +1397,7 @@ class BuzzAdapter(BasePlatformAdapter):
                 await asyncio.to_thread(self._write_cursors, self._cursor_path(), self._cursor_payload())
 
     @staticmethod
-    def _parse_imeta_attachments(event: dict) -> tuple[list[dict], int]:
+    def _parse_imeta_attachments(event: dict, plain_http: bool = False) -> tuple[list[dict], int]:
         """Return accepted NIP-94 metadata and the rejected ``imeta`` count."""
         tags = event.get("tags")
         if not isinstance(tags, list):
@@ -1425,7 +1424,7 @@ class BuzzAdapter(BasePlatformAdapter):
                 rejected += 1
                 continue
             if (
-                parsed.scheme != "https" or not parsed_hostname or parsed.username or parsed.password or parsed.fragment
+                parsed.scheme not in (("https", "http") if plain_http else ("https",)) or not parsed_hostname or parsed.username or parsed.password or parsed.fragment
                 or not _HEX64_RE.fullmatch(digest) or not 0 < size <= _MAX_INBOUND_ATTACHMENT_BYTES
                 or total_declared_bytes + size > _MAX_INBOUND_ATTACHMENT_BYTES
             ):
@@ -1451,10 +1450,10 @@ class BuzzAdapter(BasePlatformAdapter):
         url = metadata["url"]
         try:
             parsed_url = urlsplit(url)
-            origin = ((parsed_url.hostname or "").lower().rstrip("."), parsed_url.port or 443)
+            origin = ((parsed_url.hostname or "").lower().rstrip("."), _effective_port(parsed_url))
         except ValueError:
             parsed_url, origin = None, ("", 0)
-        if parsed_url is None or parsed_url.scheme != "https" or origin not in self._attachment_origins:
+        if parsed_url is None or not (parsed_url.scheme == "https" and origin in self._attachment_origins or parsed_url.scheme == "http" and origin == self._plain_http_origin):
             logger.warning("Buzz: refusing attachment from untrusted origin %s:%s", origin[0] or "<missing>", origin[1])
             return None
         import httpx
@@ -1510,7 +1509,7 @@ class BuzzAdapter(BasePlatformAdapter):
             return
         pubkey = str(event.get("pubkey") or "").lower()
         content = event.get("content")
-        attachment_metadata, rejected_attachments = self._parse_imeta_attachments(event)
+        attachment_metadata, rejected_attachments = self._parse_imeta_attachments(event, self._plain_http_origin is not None)
         if not pubkey or not isinstance(content, str) or not (content.strip() or attachment_metadata or rejected_attachments):
             return
         # Cache before any early return so self-echo and concurrent-author traffic can still be reply parents.
